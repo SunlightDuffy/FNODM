@@ -7,13 +7,13 @@ Code for the paper *"Global Three-Dimensional Ocean Thermohaline Reconstruction 
 ```
 fno-dm/
 ├── README.md
-├── fnodm_1028.py                  # Training / inference script (baseline)
+├── fnodm.py                  # Training / inference script (baseline)
 ├── fnodm_infer_product.py         # Batch inference for 2020-2025 products
 ├── summarize_results.py           # Aggregate metrics across seeds
 ├── ablations/
-│   ├── fnodm_1028_NoDM.py         # Ablation: remove depth modulation
-│   ├── fnodm_1028_NoFNO1D.py      # Ablation: remove 1D spectral branch
-│   └── fnodm_1028_NoSpectralCov.py# Ablation: remove spectral convolution
+│   ├── fnodm_NoDM.py         # Ablation: remove depth modulation
+│   ├── fnodm_NoFNO1D.py      # Ablation: remove 1D spectral branch
+│   └── fnodm_NoSpectralCov.py# Ablation: remove spectral convolution
 ├── weights/                       # Pre-trained model checkpoints
 │   ├── joints2026/                # Joint T+S, seed=2026, M=1  (Table 4 joint row)
 │   ├── salt_s2026/                # Salt-only, seed=2026, M=1  (Table 4 independent row)
@@ -52,7 +52,7 @@ Download: https://data.marine.copernicus.eu/product/GLOBAL_MULTIYEAR_PHY_ENS_001
 
 Train from scratch:
 ```bash
-python fnodm_1028.py --input_months 1 --active salt temp --seed 2026
+python fnodm.py --input_months 1 --active salt temp --seed 2026
 ```
 
 Expected (~4.5 h on consumer GPU):
@@ -65,13 +65,13 @@ Expected (~4.5 h on consumer GPU):
 
 Or use pre-trained weights:
 ```bash
-python fnodm_1028.py --eval_only --resume weights/joints2026/fnodm_best_fnodm_1028_im1_joint_s2026.pth
+python fnodm.py --eval_only --resume weights/joints2026/fnodm_best_fnodm_im1_joint_s2026.pth
 ```
 
 ### 2. Independent Salt Model (Table 4, independent row)
 
 ```bash
-python fnodm_1028.py --input_months 1 --active salt --seed 2026
+python fnodm.py --input_months 1 --active salt --seed 2026
 ```
 
 Expected:
@@ -80,12 +80,12 @@ Expected:
 | Salt RMSE | 0.0781 psu |
 | Salt R² | 0.9854 |
 
-Pre-trained: `weights/salt_s2026/fnodm_best_fnodm_1028_im1_salt_s2026.pth`
+Pre-trained: `weights/salt_s2026/fnodm_best_fnodm_im1_salt_s2026.pth`
 
 ### 3. Independent Temperature Model (Table 4, independent row)
 
 ```bash
-python fnodm_1028.py --input_months 1 --active temp --seed 2026
+python fnodm.py --input_months 1 --active temp --seed 2026
 ```
 
 Expected:
@@ -94,20 +94,20 @@ Expected:
 | Temp RMSE | 0.4518 °C |
 | Temp R² | 0.9968 |
 
-Pre-trained: `weights/temp_s2026/fnodm_best_fnodm_1028_im1_temp_s2026.pth`
+Pre-trained: `weights/temp_s2026/fnodm_best_fnodm_im1_temp_s2026.pth`
 
 ### 4. Multi-Seed Stability (Tables 5, 6)
 
 ```bash
 # Seed 2025
-python fnodm_1028.py --input_months 1 --active salt temp --seed 2025
-python fnodm_1028.py --input_months 1 --active salt --seed 2025
-python fnodm_1028.py --input_months 1 --active temp --seed 2025
+python fnodm.py --input_months 1 --active salt temp --seed 2025
+python fnodm.py --input_months 1 --active salt --seed 2025
+python fnodm.py --input_months 1 --active temp --seed 2025
 
 # Seed 2027
-python fnodm_1028.py --input_months 1 --active salt temp --seed 2027
-python fnodm_1028.py --input_months 1 --active salt --seed 2027
-python fnodm_1028.py --input_months 1 --active temp --seed 2027
+python fnodm.py --input_months 1 --active salt temp --seed 2027
+python fnodm.py --input_months 1 --active salt --seed 2027
+python fnodm.py --input_months 1 --active temp --seed 2027
 ```
 
 Pre-trained weights in `weights/seeds2025/` and `weights/seeds2027/`.
@@ -116,13 +116,13 @@ Pre-trained weights in `weights/seeds2025/` and `weights/seeds2027/`.
 
 ```bash
 # Remove depth modulation
-python ablations/fnodm_1028_NoDM.py
+python ablations/fnodm_NoDM.py
 
 # Remove spectral convolution (keep only 1x1 branch)
-python ablations/fnodm_1028_NoSpectralCov.py
+python ablations/fnodm_NoSpectralCov.py
 
 # Remove 1D channel-mixing branch
-python ablations/fnodm_1028_NoFNO1D.py
+python ablations/fnodm_NoFNO1D.py
 ```
 
 ## Key Hyperparameters
