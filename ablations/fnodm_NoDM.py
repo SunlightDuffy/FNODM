@@ -20,41 +20,49 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 # ==================================================================
-# 0. 常量（固定，勿改 —— 改了与历史数字不可比）
+# 0. Constants (fixed, do not modify — changes break comparability with historical results)
 # ==================================================================
 
 SEED = 2026
 
-# 标签归一化常数
+# Label normalization constants
 SALT_MEAN, SALT_STD = 34.745396, 0.6393247
 TEMP_MEAN, TEMP_STD = 9.403517, 8.000061
 MEAN_STD = {'salt': (SALT_MEAN, SALT_STD), 'temp': (TEMP_MEAN, TEMP_STD)}
 STD = {'salt': SALT_STD, 'temp': TEMP_STD}
 VALID_VARS = ('salt', 'temp')
 
-# 输入变量（6 个 × mean/std = 12 通道/月），顺序不可变
-VARS = ['uo_mean', 'uo_std', 'vo_mean', 'vo_std', 'mlotst_mean', 'mlotst_std',
-        'so_mean', 'so_std', 'thetao_mean', 'thetao_std', 'zos_mean', 'zos_std']
-DATA_MEAN = [0.00090828876, 0.050593812, 0.0047905985, 0.047351096, 47.800728, 10.757117,
-             34.009117, 0.21114606, 13.841141, 0.18191428, -0.18183799, 0.033111636]
-DATA_STD = [0.1346134, 0.04672826, 0.0801891, 0.045290526, 52.75789, 24.374735,
-            2.3664289, 0.3743279, 11.660583, 0.17114641, 0.7058132, 0.032751158]
+VARS_ALL = ['uo_mean', 'uo_std', 'vo_mean', 'vo_std', 'mlotst_mean', 'mlotst_std',
+            'so_mean', 'so_std', 'thetao_mean', 'thetao_std', 'zos_mean', 'zos_std']
+DATA_MEAN_ALL = [0.00090828876, 0.050593812, 0.0047905985, 0.047351096, 47.800728, 10.757117,
+                 34.009117, 0.21114606, 13.841141, 0.18191428, -0.18183799, 0.033111636]
+DATA_STD_ALL = [0.1346134, 0.04672826, 0.0801891, 0.045290526, 52.75789, 24.374735,
+                2.3664289, 0.3743279, 11.660583, 0.17114641, 0.7058132, 0.032751158]
+
+
+DROP_GROUPS = {
+    'mla': ('mlotst_mean', 'mlotst_std'),
+    'uv': ('uo_mean', 'uo_std', 'vo_mean', 'vo_std'),
+    'ssh': ('zos_mean', 'zos_std'),
+}
+VARS = list(VARS_ALL)
+DATA_MEAN = list(DATA_MEAN_ALL)
+DATA_STD = list(DATA_STD_ALL)
 N_STATIC = 3                       # deptho / lon / lat
 
 GRID = (170, 360)                  # lat -79.5~89.5 × lon 0.5~359.5
-N_LEVELS = 26                       # Argo LEVEL 的 slice(1, 27)
+N_LEVELS = 26                       # Argo LEVEL slice(1, 27)
 LEVELS_M = np.array([
     5., 10., 20., 30., 50., 75., 100., 125., 150., 200., 250., 300., 400., 500.,
     600., 700., 800., 900., 1000., 1100., 1200., 1300., 1400., 1500., 1750., 2000.])
 
-# 深度分档（闭区间；30-1000 m 恰好 16 层，与 SwinOcean3D 同口径）
 BANDS = (('full_5_2000', 0.0, 2001.0), ('swin_30_1000', 30.0, 1000.0),
          ('upper_0_150', 0.0, 150.0), ('mid_150_500', 150.0, 500.0),
          ('deep_500_2000', 500.0, 2001.0))
 
-TRAIN_RANGE = (1, 144)             # 143 个月
-VAL_RANGE = (144, 156)             # 12
-TEST_RANGE = (156, 180)            # 24
+TRAIN_RANGE = (1, 144)             # 143 months
+VAL_RANGE = (144, 156)             # 12 months
+TEST_RANGE = (156, 180)            # 24 months
 
 CMEMS_FILE = ('cmems_mod_glo_phy-mnstd_my_0.25deg_P1M-m_multi-vars_'
               '180.00W-179.75E_80.00S-90.00N_0.51m_2004-12-01-2020-04-01.nc')
@@ -69,8 +77,32 @@ def seed_everything(seed=SEED):
     torch.cuda.manual_seed_all(seed)
 
 
+def apply_drop(drop_spec):
+    global VARS, DATA_MEAN, DATA_STD
+    if not drop_spec:
+        return []
+    drop = set()
+    for tok in drop_spec.replace(' ', '').split(','):
+        if not tok:
+            continue
+        if tok in DROP_GROUPS:
+            drop.update(DROP_GROUPS[tok])
+        elif tok in VARS_ALL:
+            drop.add(tok)
+        else:
+            raise SystemExit(
+                f"[fatal] --drop unrecognized: {tok!r}; available groups: {sorted(DROP_GROUPS)}, "
+                f"or individual variable names: {VARS_ALL}")
+    if len(drop) >= len(VARS_ALL):
+        raise SystemExit("[fatal] --drop removed all input variables—model cannot train")
+    keep = [i for i, v in enumerate(VARS_ALL) if v not in drop]
+    VARS = [VARS_ALL[i] for i in keep]
+    DATA_MEAN = [DATA_MEAN_ALL[i] for i in keep]
+    DATA_STD = [DATA_STD_ALL[i] for i in keep]
+    return sorted(drop)
+
+
 def make_slices(active):
-    """active 顺序 → 通道切片。active=('salt','temp') → [0:26]=SALT、[26:52]=TEMP。"""
     return {v: slice(i * N_LEVELS, (i + 1) * N_LEVELS) for i, v in enumerate(active)}
 
 
@@ -79,7 +111,6 @@ def band_layers(lo, hi):
 
 
 def find_data_root(explicit=None):
-    """从 --data_root 或本文件位置向上找含 cmems 文件的 Data 目录。"""
     cands = []
     if explicit:
         cands.append(explicit)
@@ -91,16 +122,16 @@ def find_data_root(explicit=None):
         if os.path.isfile(os.path.join(c, CMEMS_FILE)):
             return os.path.abspath(c)
     raise SystemExit(
-        f"[fatal] 未找到数据目录（含 {CMEMS_FILE}）。已尝试：\n  "
-        + "\n  ".join(cands) + "\n请用 --data_root 指定。")
+        f"[fatal] Data directory not found (containing {CMEMS_FILE}). Searched:\n  "
+        + "\n  ".join(cands) + "\nPlease specify with --data_root.")
 
 
 # ==================================================================
-# 1. 模型：FNO2D+1D 共享编码器 + 每变量私有解码器
+# 1. Model: FNO2D+1D shared encoder + per-variable private decoder
 # ==================================================================
 
 class SpectralConv2d(nn.Module):
-    """沿 (H, W) 的 2D 谱卷积，截断到 m1 × m2 个低频模态。"""
+    """2D spectral convolution over (H, W), truncated to m1 × m2 low-frequency modes."""
 
     def __init__(self, in_c, out_c, m1, m2):
         super().__init__()
@@ -123,7 +154,6 @@ class SpectralConv2d(nn.Module):
 
 
 class SpectralConv1d(nn.Module):
-    """沿通道栈方向的 1D 谱卷积。"""
 
     def __init__(self, in_c, out_c, modes):
         super().__init__()
@@ -206,14 +236,6 @@ class SharedFNOEncoder(nn.Module):
 
 
 class DepthModulatedDecoder(nn.Module):
-    """单变量的深度调制解码器（FNO-DM 的 DM 组件）。
-
-    z [B, width, H, W] ──(逐层 FiLM 调制 + 共享 1×1 头)──> [B, D, H, W]
-                       ──(深度可分离 1D 卷积垂向平滑)────> [B, D, H, W]
-
-    参数量 O(width²)，与层数 D 无关。**必须每个变量私有**：共享 γ/β 时
-    盐度误差会恶化 20% 以上（历史 11-salt_temp_union 结论）。
-    """
 
     def __init__(self, width, out_levels=26, dropout=0.1, vert_kernel=3):
         super().__init__()
@@ -222,7 +244,7 @@ class DepthModulatedDecoder(nn.Module):
         self.depth_embed = nn.Embedding(out_levels, width)
         nn.init.normal_(self.depth_embed.weight, std=0.02)
         self.gamma, self.beta = nn.Linear(width, width), nn.Linear(width, width)
-        # 初始化为恒等调制 γ=1、β=0
+        # Initialize as identity modulation: γ=1, β=0
         nn.init.zeros_(self.gamma.weight); nn.init.ones_(self.gamma.bias)
         nn.init.zeros_(self.beta.weight); nn.init.zeros_(self.beta.bias)
 
@@ -235,10 +257,10 @@ class DepthModulatedDecoder(nn.Module):
 
     def forward(self, z):
         B, C, H, W = z.shape
-        # emb = self.depth_embed.weight
-        # g, b = self.gamma(emb), self.beta(emb)
-
-        out = torch.cat([self.head(z)
+        emb = self.depth_embed.weight
+        g, b = self.gamma(emb), self.beta(emb)
+        out = torch.cat([self.head(g[d].view(1, self.width, 1, 1) * z
+                                   + b[d].view(1, self.width, 1, 1))
                          for d in range(self.out_levels)], dim=1)
         o = self.vert_smooth(out.reshape(B, self.out_levels, H * W))
         return o.reshape(B, self.out_levels, H, W)
@@ -247,11 +269,6 @@ class DepthModulatedDecoder(nn.Module):
 
 
 class FNODM(nn.Module):
-    """共享编码器 + 按 active 构建的私有解码器。
-
-    active=('salt','temp') → 联合模型；active=('salt',) → 独立基线。
-    两者编码器逐参数一致，单变量模式不会实例化多余解码器。
-    """
 
     def __init__(self, in_ch=15, out_levels=26, width=128,
                  width_1d=64, modes_2d=(16, 16), modes_1d=16, n_layers_2d=4, n_layers_1d=2,
@@ -260,7 +277,7 @@ class FNODM(nn.Module):
         super().__init__()
         active = tuple(active)
         if not active or any(v not in VALID_VARS for v in active):
-            raise ValueError(f"active 只能是 {VALID_VARS} 的非空子集，收到 {active!r}")
+            raise ValueError(f"active must be a non-empty subset of {VALID_VARS}, got {active!r}")
         self.in_ch, self.out_levels, self.active = in_ch, out_levels, active
 
         self.encoder = SharedFNOEncoder(
@@ -289,20 +306,22 @@ class FNODM(nn.Module):
     def describe(self):
         enc = sum(p.numel() for p in self.encoder.parameters())
         dec = {v: sum(p.numel() for p in self._decoders[v].parameters()) for v in self.active}
-        s = " | ".join([f"编码器 {enc/1e6:.3f} M（共享,）"]
-                       + [f"{v} 解码器 {n/1e6:.3f} M" for v, n in dec.items()])
-        return s + f" | 合计 {(enc + sum(dec.values()))/1e6:.3f} M"
+        s = " | ".join([f"Encoder {enc/1e6:.3f} M (shared)"]
+                       + [f"{v} Decoder {n/1e6:.3f} M" for v, n in dec.items()])
+        return s + f" | Total {(enc + sum(dec.values()))/1e6:.3f} M"
 
 
 # ==================================================================
-# 2. 损失：标准化空间 MSE + Kendall 不确定性加权
+# 2. Loss: standardized spatial MSE + Kendall uncertainty weighting
 # ==================================================================
 
 class JointLoss(nn.Module):
-    """L = Σ_v [0.5·exp(-s_v)·L_v + 0.5·s_v]，L_v 在标准化空间算。
+    """L = Σ_v [0.5·exp(-s_v)·L_v + 0.5·s_v], L_v computed in standardized space.
 
-    SALT/TEMP 量纲差一个数量级以上（σ 0.64 psu vs 8.0 °C），物理空间直接
-    相加会让温度项量级约为盐度项的 30 倍，盐度基本学不动，故先在归一空间算。
+    SALT/TEMP differ in magnitude by more than one order (σ 0.64 psu vs 8.0 °C).
+    Adding them directly in physical space makes the temperature term ~30× the
+    salinity term, leaving salinity barely trained. We therefore compute the loss
+    in normalized space first.
     """
 
     def __init__(self, active=('salt', 'temp')):
@@ -333,14 +352,16 @@ class JointLoss(nn.Module):
 
 
 # ==================================================================
-# 3. 数据集
+# 3. Dataset
 # ==================================================================
 
 class STDataset(torch.utils.data.Dataset):
-    """输入（海表 12 通道/月 + 3 静态）、标签（Argo 26 层 × active）。
+    """Input (surface 12 channels/month + 3 static), labels (Argo 26 levels × active).
 
-    Argo 与 CMEMS 相差 1 个月：argo[i] 对应 cmems[i+1]，故单月输入取偏移 (+1,)。
-    数据一次性预载进内存；读完后立即关闭 nc 句柄（HDF5 全局锁跨进程会静默死锁）。
+    Argo and CMEMS are offset by 1 month: argo[i] corresponds to cmems[i+1],
+    so single-month input uses offset (+1,). Data are preloaded into memory once;
+    nc file handles are closed immediately afterwards (HDF5 global lock causes
+    silent deadlocks across processes).
     """
 
     def __init__(self, indices, active=('salt', 'temp'), data_root='../../Data',
@@ -348,11 +369,11 @@ class STDataset(torch.utils.data.Dataset):
         try:
             import xarray as xr
         except ImportError as e:
-            raise SystemExit("读取 nc 需要 xarray：pip install xarray netCDF4\n" + str(e))
+            raise SystemExit("Reading nc requires xarray: pip install xarray netCDF4\n" + str(e))
         self.active = tuple(active)
         self.input_months = int(input_months)
         self.offsets = (1,) if self.input_months == 1 else (-1, 0, 1)
-        self.in_ch = 12 * self.input_months + N_STATIC
+        self.in_ch = len(VARS) * self.input_months + N_STATIC
 
         cmems = xr.open_dataset(os.path.join(data_root, CMEMS_FILE)).isel(depth=0)
         argo = xr.open_dataset(os.path.join(data_root, ARGO_FILE))
@@ -374,21 +395,20 @@ class STDataset(torch.utils.data.Dataset):
 
         self.indices = [int(i) for i in indices]
         self.buf = [self._build(k, cmems, argo) for k in range(len(self.indices))]
-        print(f"[数据] {len(self.indices)} 组 | 输入 {self.in_ch} 通道 "
-              f"| 标签 {N_LEVELS * len(self.active)} 通道 | active={self.active}")
+        print(f"[Data] {len(self.indices)} groups | input {self.in_ch} channels "
+              f"| labels {N_LEVELS * len(self.active)} channels | active={self.active}")
 
-        # 读完立刻关句柄：HDF5 全局锁跨进程使用会静默死锁
+        # Close file handles immediately: HDF5 global lock causes silent deadlocks across processes
         for ds in (cmems, argo):
             try:
                 ds.close()
             except Exception:
                 pass
 
-    # ---------- 构造 ----------
 
     def _build_input(self, actual_index, cmems):
         steps = [cmems.isel(time=int(actual_index + off)) for off in self.offsets]
-        # 通道顺序 var-major / time-minor，与历史模型完全一致
+        # Channel order var-major / time-minor, identical to historical models
         chunks = []
         for v, m, s in zip(VARS, DATA_MEAN, DATA_STD):
             chunks.append(np.stack([(st[v].data - m) / s for st in steps], axis=0))
@@ -409,7 +429,7 @@ class STDataset(torch.utils.data.Dataset):
         i = self.indices[index]
         inp = self._build_input(i, cmems)
         tars, msks = [], []
-        for v in self.active:                     # 顺序必须与 make_slices 一致
+        for v in self.active:                     # Order must match make_slices
             t, m = self._build_label(i, argo, v)
             tars.append(t)
             msks.append(m)
@@ -425,7 +445,7 @@ class STDataset(torch.utils.data.Dataset):
 
 
 # ==================================================================
-# 4. 评估
+# 4. Evaluation
 # ==================================================================
 
 def _metrics(acc, sel):
@@ -444,7 +464,7 @@ def _metrics(acc, sel):
 
 @torch.no_grad()
 def evaluate(model, loader, device, active):
-    """一次扫描给出：全局 / 分深度档 / 逐层 精度（物理量纲）。"""
+    """Single-pass evaluation: global / per-depth-band / per-layer accuracy (physical units)."""
     model.eval()
     sl = make_slices(active)
     acc = {v: dict(st=np.zeros(N_LEVELS), st2=np.zeros(N_LEVELS), cnt=np.zeros(N_LEVELS),
@@ -489,7 +509,7 @@ def evaluate(model, loader, device, active):
 @torch.no_grad()
 def export_predictions(model, loader, device, active, path,
                        time_labels=None, time_indices=None):
-    """导出测试集预测（物理量纲，带 depth_levels / time_labels 元信息）。"""
+    """Export test-set predictions (physical units, with depth_levels / time_labels metadata)."""
     model.eval()
     sl = make_slices(active)
     P, T, M = {v: [] for v in active}, {v: [] for v in active}, {v: [] for v in active}
@@ -519,7 +539,7 @@ def export_predictions(model, loader, device, active, path,
         payload['time_indices'] = np.asarray(time_indices, np.int32)
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     np.savez_compressed(path, **payload)
-    print(f"[导出] 测试集预测 -> {path}")
+    print(f"[Export] Test-set predictions -> {path}")
 
 
 def train_one_epoch(model, loader, optimizer, criterion, device, grad_clip=1.0):
@@ -530,7 +550,6 @@ def train_one_epoch(model, loader, optimizer, criterion, device, grad_clip=1.0):
         loss, _ = criterion(model(inp), tar, msk)
         optimizer.zero_grad()
         loss.backward()
-        # 只裁模型参数：logvar 需要更大的有效步长，一起裁会把加权机制废掉
         nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         optimizer.step()
         tot += float(loss.item())
@@ -539,16 +558,16 @@ def train_one_epoch(model, loader, optimizer, criterion, device, grad_clip=1.0):
 
 
 # ==================================================================
-# 5. 主流程
+# 5. Main
 # ==================================================================
 
 def build_parser():
 
     task_name = os.path.basename(__file__)[:-3]
     p = argparse.ArgumentParser(
-        description="FNO-DM 最优配置单文件训练脚本（支持 1D 支路不下采样）",
+        description="FNO-DM single-file training script (final configuration, with 1D branch, no downsampling)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    # ---- 最优配置（默认值即定稿值，一般不用改）----
+    # ---- Optimal configuration (defaults are the final values; generally no need to change) ----
     p.add_argument('--active', default='joint', choices=['joint', 'salt', 'temp'])
     p.add_argument('--input_months', type=int, default=1, choices=[1, 3])
     p.add_argument('--width', type=int, default=128)
@@ -565,30 +584,34 @@ def build_parser():
     p.add_argument('--weight_decay', type=float, default=1e-3)
     p.add_argument('--lr_logvar_scale', type=float, default=10.0)
     p.add_argument('--seed', type=int, default=SEED)
+    p.add_argument('--drop', default='',
+                   help='Input ablation: mla / uv / ssh, comma-separated or variable names; empty = full 12 channels')
 
 
     p.add_argument('--task_name', type=str, default=task_name)
 
-    # ---- 运行相关 ----
+    # ---- Runtime ----
     p.add_argument('--data_root', default=None)
     p.add_argument('--out_dir', default=None,
-                   help='默认 ./<task_name>_<decoder_type><vars>/')
+                   help='Default ./<task_name>_<decoder_type><vars>/')
     p.add_argument('--device', default='cuda')
     p.add_argument('--tf32', type=int, default=0,
-                   help='1 可提速，但会改变数值轨迹，与 fp32 历史结果不可比')
-    p.add_argument('--max_samples', type=int, default=0, help='>0 只取前 N 个月，冒烟用')
-    p.add_argument('--save_every', type=int, default=25, help='每 N 个 epoch 落一次盘')
+                   help='1 = faster, but alters numerical trajectory; not comparable with fp32 historical results')
+    p.add_argument('--max_samples', type=int, default=0, help='>0 = use only first N months (smoke test)')
+    p.add_argument('--save_every', type=int, default=25, help='Save checkpoint every N epochs')
     p.add_argument('--result_csv', default=os.path.join(_HERE, 'result_all.csv'),
-                   help='所有实验结果追加写入的共享 CSV（空串则不写）')
-    p.add_argument('--fresh', action='store_true', help='忽略已有 checkpoint，从头训练')
+                   help='Shared CSV for appending all experiment results (empty = skip)')
+    p.add_argument('--fresh', action='store_true', help='Ignore existing checkpoint, train from scratch')
     return p
 
 
 def append_result_csv(res, path):
-    """把单次实验结果追加写入共享 CSV。
+    """Append a single experiment result row to the shared CSV.
 
-    joint 与单变量跑的字段不同，故列集合取并集：文件已存在时读回旧表头，
-    出现新字段则重写表头并为历史行补空值；缺失字段一律写空串。
+    Joint and single-variable runs have different fields, so columns are merged
+    via union: if the file already exists, the old header is read back; new fields
+    trigger a header rewrite with empty values filled for historical rows; missing
+    fields are always written as empty strings.
     """
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     fieldnames = list(res.keys())
@@ -616,7 +639,9 @@ def append_result_csv(res, path):
 
 def main():
     args = build_parser().parse_args()
-    args.task_name = f'{args.task_name}_im{args.input_months}_{args.active}_s{args.seed}'
+    tag = f"_drop-{args.drop.replace(',', '+').replace(' ', '')}" if args.drop else ''
+    args.task_name = (f'{args.task_name}_im{args.input_months}_{args.active}'
+                      f'_s{args.seed}{tag}')
     if args.out_dir is None:
         args.out_dir = os.path.join(_HERE, args.task_name)
 
@@ -627,18 +652,22 @@ def main():
         torch.backends.cudnn.allow_tf32 = True
 
     active = {'joint': ('salt', 'temp'), 'salt': ('salt',), 'temp': ('temp',)}[args.active]
+    dropped = apply_drop(args.drop)
     data_root = find_data_root(args.data_root)
-    in_ch = 12 * args.input_months + N_STATIC
+    in_ch = len(VARS) * args.input_months + N_STATIC
     os.makedirs(args.out_dir, exist_ok=True)
 
     print("=" * 78)
-    print(f"FNO-DM  |  active={active}  |  输入 {in_ch} 通道 "
-          f"（{args.input_months} 个月） ")
-    print(f"数据 {data_root}   |   设备 {device}   |   seed {args.seed}")
+    print(f"FNO-DM  |  active={active}  |  input {in_ch} channels "
+          f"({args.input_months} months \u00d7 {len(VARS)} vars + {N_STATIC} static) ")
+    if dropped:
+        print(f"[Ablation] Removed {len(dropped)} channels: {', '.join(dropped)}")
+        print(f"          Keeping {len(VARS)} channels: {', '.join(VARS)}")
+    print(f"Data {data_root}   |   Device {device}   |   seed {args.seed}")
     print("=" * 78)
 
 
-    # ---------- 数据 ----------
+    # ---------- Data ----------
     def idxs(rng):
         lo, hi = rng
         v = list(range(lo, hi))
@@ -649,20 +678,20 @@ def main():
     train_ds = STDataset(tr_idx, **ds_kw)
     val_ds = STDataset(va_idx, **ds_kw)
     test_ds = STDataset(te_idx, **ds_kw)
-    # num_workers=0：数据已在内存，多进程只会 fork 出多余副本
+    # num_workers=0: data already in memory; multiprocessing would only fork extra copies
     tr_loader = torch.utils.data.DataLoader(train_ds, batch_size=args.batch,
                                             shuffle=True, num_workers=0)
     va_loader = torch.utils.data.DataLoader(val_ds, batch_size=2, shuffle=False, num_workers=0)
     te_loader = torch.utils.data.DataLoader(test_ds, batch_size=2, shuffle=False, num_workers=0)
 
-    # ---------- 模型 / 优化器 ----------
+    # ---------- Model / Optimizer ----------
     model = FNODM(in_ch=in_ch, out_levels=N_LEVELS, width=args.width, width_1d=args.width_1d,
                   modes_2d=tuple(args.modes_2d), modes_1d=args.modes_1d,
                   n_layers_2d=args.n_layers_2d, n_layers_1d=args.n_layers_1d,
                   dropout=args.dropout,
                   active=active).to(device)
     n_param = sum(p.numel() for p in model.parameters())
-    print(f"[模型] {model.describe()}")
+    print(f"[Model] {model.describe()}")
 
     criterion = JointLoss(active=active).to(device)
     optimizer = torch.optim.AdamW([
@@ -673,7 +702,7 @@ def main():
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.epoch, eta_min=1e-5)
 
-    checkpoint_path = os.path.join(args.out_dir, f'fnodm_best_{args.task_name}.pth')
+    checkpoint_path = os.path.join(args.out_dir, f'fnodm_{args.task_name}.pth')
     best_score, best_epoch, wait = float('inf'), 0, 0
     best_state = None
 
@@ -686,7 +715,6 @@ def main():
                     'best_epoch': best_epoch, 'wait': wait, 'epoch': ep,
                     'active': active, 'in_ch': in_ch}, checkpoint_path)
 
-    # 断点续跑：已有 checkpoint 就接着跑（--fresh 强制从头）
     start_epoch = 1
     if os.path.exists(checkpoint_path) and not args.fresh:
         ck = torch.load(checkpoint_path, map_location=device, weights_only=False)
@@ -701,18 +729,18 @@ def main():
         start_epoch = ck['epoch'] + 1
         best_score, best_epoch, wait = ck['best_score'], ck['best_epoch'], ck['wait']
         best_state = ck.get('best_model')
-        print(f"[续训] 从 {checkpoint_path} 的 epoch {ck['epoch']} 继续"
-              f"（best {best_score:.5f}@{best_epoch}）")
+        print(f"[Resume] Continuing from {checkpoint_path} epoch {ck['epoch']}"
+              f" (best {best_score:.5f}@{best_epoch})")
 
     t0 = time.time()
     epoch = start_epoch - 1
-    print(f"[训练] 开始 @ {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
+    print(f"[Train] Start @ {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
     for epoch in range(start_epoch, args.epoch + 1):
         tr_loss = train_one_epoch(model, tr_loader, optimizer, criterion, device)
         va = evaluate(model, va_loader, device, active)
         scheduler.step()
 
-        # 综合分：各变量 RMSE / 自身 std 后取平均（无量纲）
+        # Composite score: average RMSE / per-variable std (dimensionless)
         score = sum(va['overall'][v]['rmse'] / STD[v] for v in active) / len(active)
         if score < best_score:
             best_score, best_epoch, wait = score, epoch, 0
@@ -733,26 +761,27 @@ def main():
             save_checkpoint(epoch)
 
         if wait >= args.patience:
-            print(f"[早停] {args.patience} 个 epoch 无提升（最佳 @ epoch {best_epoch}）")
+            print(f"[Early stop] No improvement for {args.patience} epochs (best @ epoch {best_epoch})")
             break
 
-    # ---------- 最终评估：用验证集最优权重 ----------
+    # ---------- Final evaluation: use validation-set best weights ----------
     if best_state is not None:
         model.load_state_dict(best_state)
         save_checkpoint(epoch)
-        print(f"[评估] 载入最优权重（epoch {best_epoch}）-> {checkpoint_path}")
+        print(f"[Eval] Loaded best weights (epoch {best_epoch}) -> {checkpoint_path}")
     else:
-        print("[警告] 没有 best_state（续训且未再提升），用当前权重评估")
+        print("[Warning] No best_state (resumed with no further improvement), evaluating with current weights")
 
     meta_labels = getattr(test_ds, 'time_labels', None)
     labels = ([meta_labels[i] for i in te_idx] if meta_labels else None)
     export_predictions(model, te_loader, device, active,
-                       os.path.join(args.out_dir, 'fnodm_best_predictions_Heads_flat_linear.npz'),
+                       os.path.join(args.out_dir, f'fnodm_{args.task_name}.npz'),
+                       # f'result_{}.json'
                        time_labels=labels, time_indices=te_idx)
     ev = evaluate(model, te_loader, device, active)
 
-    # ---------- 逐层剖面 ----------
-    prof_path = os.path.join(args.out_dir, 'fnodm_best_profile_Heads_flat_linear.csv')
+    # ---------- Per-layer profile ----------
+    prof_path = os.path.join(args.out_dir, f'fnodm_{args.task_name}.csv')
     with open(prof_path, 'w', newline='', encoding='utf-8-sig') as f:
         cols = ['depth_m'] + [f'{v}_{k}' for v in active
                               for k in ('rmse', 'r2', 'bias', 'n')]
@@ -761,12 +790,14 @@ def main():
         for row in ev['profile']:
             w.writerow(row)
 
-    # ---------- 结果 ----------
+    # ---------- Results ----------
     print("=" * 78)
-    print(f"测试集 {len(test_ds)} 个时间点："
+    print(f"Test set {len(test_ds)} time points: "
           f"{labels[0] if labels else te_idx[0]} ~ {labels[-1] if labels else te_idx[-1]}")
     res = {'best_epoch': best_epoch, 'params': n_param, 'seed': args.seed,
            'active': list(active), 'input_months': args.input_months,
+           'drop': args.drop, 'n_input_ch': len(VARS),
+           'input_vars': ','.join(VARS),
        }
     for v in active:
         m = ev['overall'][v]
@@ -780,39 +811,27 @@ def main():
         if m:
             res[f'{v}_rmse_30_1000'] = m['rmse']; res[f'{v}_r2_30_1000'] = m['r2']
             print(f"  {v.upper():4s} 30-1000 m   RMSE {m['rmse']:.5f}   R2 {m['r2']:.5f}"
-                  f"   （{b['n_layers']} 层，SwO-3D 同口径）")
+                  f"   ({b['n_layers']} layers, SwO-3D caliber)")
     print("=" * 78)
     total_run_time = f'{(time.time()-t0)/60:.2f} min'
     #
     res['Begin_time']=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t0))
     res['End_time']=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
     res['total_run_time'] = total_run_time
-    with open(os.path.join(args.out_dir, 'result_Heads_flat_linear.json'), 'w', encoding='utf-8') as f:
+    with open(os.path.join(args.out_dir, f'result_{args.task_name}.json'), 'w', encoding='utf-8') as f:
         json.dump(res, f, ensure_ascii=False, indent=2)
-    print(f"[结果] total_run_time {total_run_time} min -> "
-          f"{os.path.join(args.out_dir, 'result_Heads_flat_linear.json')}")
+    print(f"[Result] total_run_time {total_run_time} min -> "
+          f"{os.path.join(args.out_dir, f'result_{args.task_name}.json')}")
 
-    # ---------- 追加写入共享 CSV ----------
+    # ---------- Append to shared CSV ----------
     if args.result_csv:
         res = {'task_name': args.task_name, 'best_score': best_score, **res}
         try:
             append_result_csv(res, args.result_csv)
-            print(f"[结果] 已追加一行 -> {args.result_csv}")
+            print(f"[Result] Appended one row -> {args.result_csv}")
         except Exception as e:
-            print(f"[警告] 写入 {args.result_csv} 失败：{e}")
+            print(f"[Warning] Write to {args.result_csv} failed: {e}")
 
 
 if __name__ == '__main__':
     main()
-'''
-cd ~/cyx/G20260410_DR/project/Experiment_FNOModels
-conda activate your_env
-
-python fnodm.py --active=joint --input_months=1 --batch=4
-python fnodm.py --active=joint --input_months=3 --batch=4
-python fnodm.py --active=salt --input_months=1 --batch=4
-python fnodm.py --active=salt --input_months=3 --batch=4
-python fnodm.py --active=temp --input_months=1 --batch=4
-python fnodm.py --active=temp --input_months=3 --batch=4
-
-'''
